@@ -28,7 +28,9 @@ def send_telegram_alert(message):
         print(f"Telegram Delivery Failed: {e}")
 
 def trading_bot_loop():
-    exchange = ccxt.binance()
+    exchange = ccxt.bybit({
+    'enableRateLimit': True
+})
     last_processed_candle_time = None
     last_signal = None
     
