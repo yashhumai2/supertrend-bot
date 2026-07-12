@@ -5,7 +5,7 @@ import ccxt
 import pandas as pd
 import pandas_ta as ta
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 app = FastAPI()
 
@@ -70,7 +70,8 @@ def trading_bot_loop():
                 dir1 = st1[dir1_col].iloc[-2]
                 dir2 = st2[dir2_col].iloc[-2]
                 
-                readable_time = datetime.fromtimestamp(current_candle_time / 1000).strftime('%I:%M %p')
+                ist_timezone = timezone(timedelta(hours=5, minutes=30))
+                readable_time = datetime.fromtimestamp(current_candle_time / 1000, tz=ist_timezone).strftime('%I:%M %p')
                 
                 if dir1 == 1 and dir2 == 1:
                     current_signal = "BUY"
@@ -82,9 +83,9 @@ def trading_bot_loop():
                 if current_signal != last_signal:
                     if current_signal != "NEUTRAL":
                         if current_signal == "BUY":
-                            msg = f"🟢 BUY SIGNAL\nBoth Supertrends turned GREEN\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
+                            msg = f" BUY SIGNAL\nBoth Supertrends turned GREEN\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
                         else:
-                            msg = f"🔴 SELL SIGNAL\nBoth Supertrends turned RED\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
+                            msg = f" SELL SIGNAL\nBoth Supertrends turned RED\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
                         
                         send_telegram_alert(msg)
                     last_signal = current_signal
