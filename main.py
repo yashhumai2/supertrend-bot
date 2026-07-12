@@ -1,13 +1,9 @@
-import threading
 import time
-from fastapi import FastAPI
-import ccxt
+import requests
 import pandas as pd
 import pandas_ta as ta
-import requests
+import ccxt
 from datetime import datetime, timedelta, timezone
-
-app = FastAPI()
 
 # ==========================================
 # =============== CONFIG ===================
@@ -17,26 +13,31 @@ CHAT_ID = "1760826142"
 SYMBOL = "BTC/USDT"
 TIMEFRAME = "5m"
 
-def send_telegram_alert(message):
+ST1_LENGTH, ST1_MULT = 13, 2.0   # Supertrend #1: ATR length 13, Factor 2
+ST2_LENGTH, ST2_MULT = 13, 4.0   # Supertrend #2: ATR length 13, Factor 4
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def send_telegram_alert(message: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
     try:
-        response = requests.post(url, json=payload)
-        if response.status_code != 200:
-            print(f"Telegram API Error: {response.text}")
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": message}, timeout=10)
+        if r.status_code != 200:
+            print(f"Telegram API Error: {r.text}")
     except Exception as e:
         print(f"Telegram Delivery Failed: {e}")
 
-def trading_bot_loop():
-    # Force CCXT to route public requests via the unblocked vision mirror,
-    # and restrict market loading to SPOT only so it never calls
-    # fapi.binance.com / dapi.binance.com (which 451 on restricted regions).
-    exchange = ccxt.binance({
+
+def get_exchange():
+    # Restrict to spot-only market loading and route public data through
+    # the unblocked data-vision mirror (avoids fapi/dapi 451 errors).
+    return ccxt.binance({
         'enableRateLimit': True,
         'options': {
             'defaultType': 'spot',
-            'fetchMarkets': ['spot'],   # stop implicit futures (fapi/dapi) market loading
-            'fetchCurrencies': False,   # avoid extra sapi call some setups trigger
+            'fetchMarkets': ['spot'],
+            'fetchCurrencies': False,
         },
         'urls': {
             'api': {
@@ -45,84 +46,78 @@ def trading_bot_loop():
         }
     })
 
-    # One-time confirmation of what actually got loaded, so the log
-    # makes it obvious if futures endpoints are (not) being touched.
-    try:
-        exchange.load_markets()
-        types_loaded = set(m.get('type') for m in exchange.markets.values())
-        print(f"✅ Markets loaded. Types present: {types_loaded}")
-    except Exception as e:
-        print(f"⚠️ load_markets() failed: {e}")
 
+def fetch_candles(exchange, limit=400):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    return df
+
+
+def get_supertrend_direction(df, length, mult):
+    st = ta.supertrend(df['high'], df['low'], df['close'], length=length, multiplier=mult)
+    dir_col = [c for c in st.columns if 'SUPERTd' in c][0]
+    return st[dir_col]
+
+
+def main_loop():
+    exchange = get_exchange()
     last_processed_candle_time = None
-    print("🤖 Live Engine Running: Monitoring Binance via unblocked Data Mirror...")
+
+    print("🤖 Dual Supertrend Engine Running on BTC/USDT (5m)...")
 
     while True:
         try:
-            # Fetch 400 candles for full Supertrend line calibration
-            ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=400)
-            if not ohlcv:
+            df = fetch_candles(exchange)
+            if df.empty:
                 time.sleep(10)
                 continue
 
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            closed_candle = df.iloc[-2]
-            current_candle_time = closed_candle['timestamp']
+            closed_candle_time = df.iloc[-2]['timestamp']
 
-            # Run trend validation only when a 5-minute block closes completely
-            if current_candle_time != last_processed_candle_time:
+            # Only evaluate once per newly closed 5m candle
+            if closed_candle_time != last_processed_candle_time:
 
-                # Compute Supertrends
-                st1 = ta.supertrend(df['high'], df['low'], df['close'], length=13, multiplier=2.0)
-                st2 = ta.supertrend(df['high'], df['low'], df['close'], length=13, multiplier=4.0)
+                dir1 = get_supertrend_direction(df, ST1_LENGTH, ST1_MULT)
+                dir2 = get_supertrend_direction(df, ST2_LENGTH, ST2_MULT)
 
-                dir1_col = [c for c in st1.columns if 'SUPERTd' in c][0]
-                dir2_col = [c for c in st2.columns if 'SUPERTd' in c][0]
+                # Previous fully-closed candle (baseline, index -3)
+                prev_green = dir1.iloc[-3] == 1 and dir2.iloc[-3] == 1
+                prev_red = dir1.iloc[-3] == -1 and dir2.iloc[-3] == -1
 
-                # 1. Look at baseline candle BEFORE the closed one (index -3)
-                dir1_prev = st1[dir1_col].iloc[-3]
-                dir2_prev = st2[dir2_col].iloc[-3]
+                # Newly closed candle (index -2)
+                curr_green = dir1.iloc[-2] == 1 and dir2.iloc[-2] == 1
+                curr_red = dir1.iloc[-2] == -1 and dir2.iloc[-2] == -1
 
-                was_both_green = (dir1_prev == 1 and dir2_prev == 1)
-                was_both_red = (dir1_prev == -1 and dir2_prev == -1)
+                readable_time = datetime.fromtimestamp(
+                    closed_candle_time / 1000, tz=IST
+                ).strftime('%I:%M %p')
 
-                # 2. Look at the newly finalized closed candle (index -2)
-                dir1_curr = st1[dir1_col].iloc[-2]
-                dir2_curr = st2[dir2_col].iloc[-2]
-
-                is_both_green = (dir1_curr == 1 and dir2_curr == 1)
-                is_both_red = (dir1_curr == -1 and dir2_curr == -1)
-
-                # Format to local Indian Standard Time (IST)
-                ist_timezone = timezone(timedelta(hours=5, minutes=30))
-                readable_time = datetime.fromtimestamp(current_candle_time / 1000, tz=ist_timezone).strftime('%I:%M %p')
-
-                # STRICT CROSSOVER FILTERS
-                if is_both_green and not was_both_green:
-                    msg = f"🟢 BUY SIGNAL\nBoth Supertrends turned GREEN\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
-                    print(f"👉 Fresh Binance BUY Crossover Arrow Detected at {readable_time}!")
+                if curr_green and not prev_green:
+                    msg = (f"🟢 BUY SIGNAL\n"
+                           f"Both Supertrends turned GREEN\n"
+                           f"Asset: {SYMBOL}\nTimeframe: {TIMEFRAME}\n"
+                           f"Bar Closed At: {readable_time}")
+                    print(f"👉 BUY crossover at {readable_time}")
                     send_telegram_alert(msg)
 
-                elif is_both_red and not was_both_red:
-                    msg = f"🔴 SELL SIGNAL\nBoth Supertrends turned RED\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
-                    print(f"👉 Fresh Binance SELL Crossover Arrow Detected at {readable_time}!")
+                elif curr_red and not prev_red:
+                    msg = (f"🔴 SELL SIGNAL\n"
+                           f"Both Supertrends turned RED\n"
+                           f"Asset: {SYMBOL}\nTimeframe: {TIMEFRAME}\n"
+                           f"Bar Closed At: {readable_time}")
+                    print(f"👉 SELL crossover at {readable_time}")
                     send_telegram_alert(msg)
 
                 else:
-                    print(f"[{readable_time}] Bar closed. Holding current trend structure. No new arrow.")
+                    print(f"[{readable_time}] No new crossover. Trend unchanged.")
 
-                last_processed_candle_time = current_candle_time
+                last_processed_candle_time = closed_candle_time
 
         except Exception as e:
             print(f"Execution Error: {e}")
 
         time.sleep(15)
 
-@app.on_event("startup")
-def startup_event():
-    threading.Thread(target=trading_bot_loop, daemon=True).start()
 
-@app.api_route("/", methods=["GET", "HEAD"])
-def home():
-    ist_timezone = timezone(timedelta(hours=5, minutes=30))
-    return {"status": "active", "engine": "running", "ist_time": str(datetime.now(ist_timezone))}
+if __name__ == "__main__":
+    main_loop()
