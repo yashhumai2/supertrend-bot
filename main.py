@@ -28,12 +28,12 @@ def send_telegram_alert(message):
         print(f"Telegram Delivery Failed: {e}")
 
 def trading_bot_loop():
-    # WORKAROUND: Force CCXT to route public requests via the unblocked public vision mirror
+    # Force CCXT to route public requests via the unblocked vision mirror with full v3 nesting
     exchange = ccxt.binance({
         'enableRateLimit': True,
         'urls': {
             'api': {
-                'public': 'https://data-api.binance.vision/api'
+                'public': 'https://data-api.binance.vision/api/v3'
             }
         }
     })
