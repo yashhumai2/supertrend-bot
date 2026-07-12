@@ -28,15 +28,22 @@ def send_telegram_alert(message):
         print(f"Telegram Delivery Failed: {e}")
 
 def trading_bot_loop():
-    # Use Kraken: Highly stable public feed for cloud deployments
-    exchange = ccxt.kraken({'enableRateLimit': True})
-    last_processed_candle_time = None
+    # WORKAROUND: Force CCXT to route public requests via the unblocked public vision mirror
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'urls': {
+            'api': {
+                'public': 'https://data-api.binance.vision/api'
+            }
+        }
+    })
     
-    print("🤖 Live Engine Running: Monitoring strict arrow crossovers...")
+    last_processed_candle_time = None
+    print("🤖 Live Engine Running: Monitoring Binance via unblocked Data Mirror...")
     
     while True:
         try:
-            # Fetch 400 candles instead of 100 to give the mathematical lines proper warm-up room
+            # Fetch 400 candles for full Supertrend line calibration
             ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=400)
             if not ohlcv:
                 time.sleep(10)
@@ -46,7 +53,7 @@ def trading_bot_loop():
             closed_candle = df.iloc[-2]
             current_candle_time = closed_candle['timestamp']
             
-            # Run math only once per closed 5-minute bar
+            # Run trend validation only when a 5-minute block closes completely
             if current_candle_time != last_processed_candle_time:
                 
                 # Compute Supertrends
@@ -56,7 +63,7 @@ def trading_bot_loop():
                 dir1_col = [c for c in st1.columns if 'SUPERTd' in c][0]
                 dir2_col = [c for c in st2.columns if 'SUPERTd' in c][0]
                 
-                # 1. Look at the baseline candle BEFORE the closed one (index -3)
+                # 1. Look at baseline candle BEFORE the closed one (index -3)
                 dir1_prev = st1[dir1_col].iloc[-3]
                 dir2_prev = st2[dir2_col].iloc[-3]
                 
@@ -70,25 +77,23 @@ def trading_bot_loop():
                 is_both_green = (dir1_curr == 1 and dir2_curr == 1)
                 is_both_red = (dir1_curr == -1 and dir2_curr == -1)
                 
-                # Setup IST timezone alignment formatting
+                # Format to local Indian Standard Time (IST)
                 ist_timezone = timezone(timedelta(hours=5, minutes=30))
                 readable_time = datetime.fromtimestamp(current_candle_time / 1000, tz=ist_timezone).strftime('%I:%M %p')
                 
-                # STRICT CROSSOVER FILTERS:
-                # A BUY arrow prints ONLY if both are green now, but weren't both green on the last candle
+                # STRICT CROSSOVER FILTERS
                 if is_both_green and not was_both_green:
                     msg = f"🟢 BUY SIGNAL\nBoth Supertrends turned GREEN\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
-                    print(f"👉 Fresh BUY Crossover Arrow Detected at {readable_time}!")
+                    print(f"👉 Fresh Binance BUY Crossover Arrow Detected at {readable_time}!")
                     send_telegram_alert(msg)
                     
-                # A SELL arrow prints ONLY if both are red now, but weren't both red on the last candle
                 elif is_both_red and not was_both_red:
                     msg = f"🔴 SELL SIGNAL\nBoth Supertrends turned RED\nAsset: {SYMBOL}\nTimeframe: {TIMEFRAME}\nBar Closed At: {readable_time}"
-                    print(f"👉 Fresh SELL Crossover Arrow Detected at {readable_time}!")
+                    print(f"👉 Fresh Binance SELL Crossover Arrow Detected at {readable_time}!")
                     send_telegram_alert(msg)
                 
                 else:
-                    print(f"[{readable_time}] Bar closed. Continuous trend zone maintained. No new arrow.")
+                    print(f"[{readable_time}] Bar closed. Holding current trend structure. No new arrow.")
                 
                 last_processed_candle_time = current_candle_time
                 
@@ -101,7 +106,6 @@ def trading_bot_loop():
 def startup_event():
     threading.Thread(target=trading_bot_loop, daemon=True).start()
 
-# Accept both GET and HEAD methods to keep UptimeRobot happy and healthy
 @app.api_route("/", methods=["GET", "HEAD"])
 def home():
     ist_timezone = timezone(timedelta(hours=5, minutes=30))
